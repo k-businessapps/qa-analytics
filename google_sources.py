@@ -12,7 +12,6 @@ import requests
 import streamlit as st
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from scoring_engine import build_scored_dataset_from_frames, normalize_header
@@ -136,46 +135,87 @@ def get_oauth_config() -> dict[str, Any]:
     }
 
 
-def _flow(state: str | None = None) -> Flow:
-    cfg = get_oauth_config()
-    client_config = {
-        "web": {
-            "client_id": cfg["client_id"],
-            "client_secret": cfg["client_secret"],
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [cfg["redirect_uri"]],
-        }
-    }
-    flow = Flow.from_client_config(client_config, scopes=cfg["scopes"], state=state)
-    flow.redirect_uri = cfg["redirect_uri"]
-    return flow
-
-
 def get_auth_url(sheet_url: str) -> str:
-    state = sheet_url
-    flow = _flow(state=state)
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent",
+    """Build a Google OAuth URL without PKCE.
+
+    Streamlit Cloud reruns the script after the Google redirect. If the OAuth
+    helper generates a PKCE code_challenge during the first run, the matching
+    code_verifier can be lost by the time Google redirects back. That produces:
+    `(invalid_grant) Missing code verifier`.
+
+    This app uses a confidential web-client OAuth flow instead. The token
+    exchange is authenticated with the client_secret from Streamlit secrets, so
+    no PKCE verifier has to survive the redirect.
+    """
+    cfg = get_oauth_config()
+    params = {
+        "client_id": cfg["client_id"],
+        "redirect_uri": cfg["redirect_uri"],
+        "response_type": "code",
+        "scope": " ".join(cfg["scopes"]),
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "state": sheet_url,
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+
+
+def _create_credentials_from_token_payload(payload: dict[str, Any]) -> Credentials:
+    cfg = get_oauth_config()
+    return Credentials(
+        token=payload.get("access_token"),
+        refresh_token=payload.get("refresh_token"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=cfg["client_id"],
+        client_secret=cfg["client_secret"],
+        scopes=cfg["scopes"],
     )
-    return auth_url
 
 
 def handle_oauth_callback() -> None:
     params = st.query_params
+
+    if "error" in params:
+        error = params.get("error")
+        if isinstance(error, list):
+            error = error[0]
+        st.query_params.clear()
+        raise RuntimeError(f"Google OAuth failed: {error}")
+
     if "code" not in params:
         return
+
     code = params.get("code")
     state = params.get("state", "")
     if isinstance(code, list):
         code = code[0]
     if isinstance(state, list):
         state = state[0]
-    flow = _flow(state=state or None)
-    flow.fetch_token(code=code)
-    st.session_state["google_credentials"] = flow.credentials.to_json()
+
+    cfg = get_oauth_config()
+    response = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "redirect_uri": cfg["redirect_uri"],
+            "grant_type": "authorization_code",
+        },
+        timeout=30,
+    )
+
+    if not response.ok:
+        try:
+            details = response.json()
+        except Exception:
+            details = response.text
+        st.query_params.clear()
+        raise RuntimeError(f"Google token exchange failed: {details}")
+
+    creds = _create_credentials_from_token_payload(response.json())
+    st.session_state["google_credentials"] = creds.to_json()
     if state:
         st.session_state["pending_google_sheet_url"] = state
     st.query_params.clear()
@@ -186,14 +226,17 @@ def get_credentials() -> Credentials | None:
     raw = st.session_state.get("google_credentials")
     if not raw:
         return None
-    creds = Credentials.from_authorized_user_info(raw if isinstance(raw, dict) else json.loads(raw), DEFAULT_SCOPES)
+    cfg = get_oauth_config()
+    creds = Credentials.from_authorized_user_info(
+        raw if isinstance(raw, dict) else json.loads(raw),
+        cfg["scopes"],
+    )
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(GoogleRequest())
         st.session_state["google_credentials"] = creds.to_json()
     if creds and creds.valid:
         return creds
     return None
-
 
 def disconnect_google() -> None:
     st.session_state.pop("google_credentials", None)
