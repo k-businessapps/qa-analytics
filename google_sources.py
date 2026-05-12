@@ -14,7 +14,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from scoring_engine import build_scored_dataset_from_frames, normalize_header
+from scoring_engine import build_scored_dataset_from_frames, normalize_header, ragged_csv_to_frame
 
 
 DEFAULT_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -102,8 +102,20 @@ def load_published_google_sheet(url: str):
         csv_url = build_published_csv_url(url)
         response = requests.get(csv_url, timeout=30)
         response.raise_for_status()
-        audit_raw = pd.read_csv(io.StringIO(response.text), header=None, dtype=object)
-        source_note = "Published Google Sheet CSV"
+        text = response.text
+        # Published Google Sheet links sometimes return ragged CSV where the first rows
+        # contain fewer cells than later audit rows. pandas.read_csv can fail with
+        # "Expected X fields, saw Y". The ragged CSV reader preserves every row by
+        # padding shorter rows instead of dropping or skipping data.
+        if text.lstrip().startswith("<"):
+            try:
+                tables = pd.read_html(io.StringIO(text), header=None)
+                audit_raw = next((t for t in tables if {"qualityauditor", "agentname"}.intersection({normalize_header(x) for x in t.head(5).astype(str).values.flatten().tolist()})), tables[0])
+            except Exception as exc:
+                raise RuntimeError(f"Published link returned HTML that could not be parsed as a sheet table: {exc}") from exc
+        else:
+            audit_raw = ragged_csv_to_frame(text)
+        source_note = "Published Google Sheet"
 
     return build_scored_dataset_from_frames(audit_raw, scoring_raw, source_name=source_note)
 
@@ -216,11 +228,8 @@ def handle_oauth_callback() -> None:
 
     creds = _create_credentials_from_token_payload(response.json())
     st.session_state["google_credentials"] = creds.to_json()
-    st.session_state["data_source_mode"] = "Google OAuth"
-    st.session_state["oauth_callback_completed"] = True
     if state:
         st.session_state["pending_google_sheet_url"] = state
-        st.session_state["oauth_sheet_url"] = state
     st.query_params.clear()
     st.rerun()
 

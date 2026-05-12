@@ -20,6 +20,7 @@ from google_sources import (
     load_published_google_sheet,
 )
 from scoring_engine import (
+    BREAKDOWN_COLUMNS,
     FILTER_COLUMNS,
     META_COLUMNS_CANONICAL,
     ScoredDataset,
@@ -86,7 +87,8 @@ def kpi_card(label: str, value: str, sub: str = "") -> None:
 
 
 def section_title(title: str, copy: str = "") -> None:
-    st.markdown(f"<div class='section-title'>{title}</div><div class='section-copy'>{copy}</div>", unsafe_allow_html=True)
+    del copy
+    st.markdown(f"<div class='section-title'>{title}</div>", unsafe_allow_html=True)
 
 
 def fig_layout(fig: go.Figure, height: int = 420) -> go.Figure:
@@ -132,14 +134,10 @@ def _load_oauth_cached(spreadsheet_id: str, audit_sheet_title: str, token_finger
 def source_picker() -> ScoredDataset | None:
     handle_oauth_callback()
     st.sidebar.header("Data source")
-    source_mode_options = ["Upload .xlsx or .csv", "Google published link", "Google OAuth"]
-    if st.session_state.get("data_source_mode") not in source_mode_options:
-        st.session_state["data_source_mode"] = "Upload .xlsx or .csv"
-
     source_mode = st.sidebar.radio(
         "Choose how to load QA data",
-        source_mode_options,
-        key="data_source_mode",
+        ["Upload .xlsx or .csv", "Google published link", "Google OAuth"],
+        index=0,
     )
 
     if source_mode == "Upload .xlsx or .csv":
@@ -149,7 +147,6 @@ def source_picker() -> ScoredDataset | None:
         return _load_upload_cached(uploaded.getvalue(), uploaded.name)
 
     if source_mode == "Google published link":
-        st.sidebar.caption("Use the published Google Sheets web page or CSV link. If the Scoring tab is not visible publicly, fallback scoring is used.")
         published_url = st.sidebar.text_input("Published Google Sheet link")
         if not published_url:
             return None
@@ -158,12 +155,8 @@ def source_picker() -> ScoredDataset | None:
             return _load_published_cached(published_url)
         return _load_published_cached(published_url)
 
-    st.sidebar.caption("Use this for private Google Sheets. The Google Cloud OAuth redirect URI must exactly match your Streamlit app URL.")
-    pending_url = st.session_state.get("pending_google_sheet_url", "")
-    if pending_url and not st.session_state.get("oauth_sheet_url"):
-        st.session_state["oauth_sheet_url"] = pending_url
-
-    sheet_url = st.sidebar.text_input("Private Google Sheet link", key="oauth_sheet_url")
+    pending_url = st.session_state.pop("pending_google_sheet_url", "")
+    sheet_url = st.sidebar.text_input("Private Google Sheet link", value=pending_url, key="oauth_sheet_url")
     if st.sidebar.button("Disconnect Google"):
         disconnect_google()
         st.rerun()
@@ -251,10 +244,18 @@ def apply_filters(dataset: ScoredDataset) -> dict[str, Any]:
         filtered = filtered[filtered["Failed Parameter Count"].gt(0)]
 
     ids = set(filtered["Record ID"].tolist())
+    data_view = dataset.data_view.copy() if hasattr(dataset, "data_view") else pd.DataFrame()
+    comparison_df = dataset.comparison_df.copy() if hasattr(dataset, "comparison_df") else pd.DataFrame()
+    if not data_view.empty and "Record ID" in data_view.columns:
+        data_view = data_view[data_view["Record ID"].isin(ids)].copy()
+    if not comparison_df.empty and "Record ID" in comparison_df.columns:
+        comparison_df = comparison_df[comparison_df["Record ID"].isin(ids)].copy()
     return {
         "df": filtered,
         "long_df": long_df[long_df["Record ID"].isin(ids)].copy(),
         "compliance_df": compliance_df[compliance_df["Record ID"].isin(ids)].copy(),
+        "data_view": data_view,
+        "comparison_df": comparison_df,
         "score_col": score_col,
         "score_mode_label": score_mode_label,
         "date_field": date_field,
@@ -282,7 +283,6 @@ def hero(dataset: ScoredDataset, ctx: dict[str, Any]) -> None:
         f"""
         <div class="hero">
             <h1>QA Audit Intelligence</h1>
-            <p>Weighted QA analytics that recalculates scores from raw audit responses only. Columns are matched by names, not fixed Excel positions.</p>
             {''.join(chips)}
         </div>
         """,
@@ -320,6 +320,7 @@ def render_overview(df: pd.DataFrame, long_df: pd.DataFrame, ctx: dict[str, Any]
             fig.add_scatter(x=daily[date_field], y=daily["Avg_Score"], name="Average score", mode="lines+markers")
             fig.update_layout(yaxis=dict(tickformat=".0%", title="Average score"), yaxis2=dict(title="Audits", overlaying="y", side="right", showgrid=False))
             st.plotly_chart(fig_layout(fig, 420), use_container_width=True)
+            st.caption("Bars show audit volume. The line shows the selected average score over time.")
         else:
             st.info("No valid date field found for trend analysis.")
 
@@ -333,6 +334,7 @@ def render_overview(df: pd.DataFrame, long_df: pd.DataFrame, ctx: dict[str, Any]
             fig.update_xaxes(tickformat=".0%")
             fig.update_traces(texttemplate="%{text:.0%}", textposition="outside")
             st.plotly_chart(fig_layout(fig, 420), use_container_width=True)
+            st.caption("Each section score is recalculated after excluding blank, NA, and non-applicable responses.")
         else:
             st.info("No section-level scores available.")
 
@@ -342,6 +344,7 @@ def render_overview(df: pd.DataFrame, long_df: pd.DataFrame, ctx: dict[str, Any]
         fig = px.histogram(df, x=score_col, color="Call/Chat" if "Call/Chat" in df.columns else None, nbins=16)
         fig.update_xaxes(tickformat=".0%")
         st.plotly_chart(fig_layout(fig, 360), use_container_width=True)
+        st.caption("Shows how the selected score is distributed across Call/Chat records.")
     with c2:
         section_title("Top issue drivers", "Parameters with the highest issue rate in the current slice.")
         findings = parameter_failure_summary(long_df)
@@ -349,6 +352,7 @@ def render_overview(df: pd.DataFrame, long_df: pd.DataFrame, ctx: dict[str, Any]
             fig = px.bar(findings.head(10), x="Failure_Rate", y="Parameter", orientation="h", text="Issue_Audits", color="Section")
             fig.update_xaxes(tickformat=".0%")
             st.plotly_chart(fig_layout(fig, 360), use_container_width=True)
+            st.caption("Ranks scored parameters by issue rate. Compliance-only flags are not included here.")
         else:
             st.info("No issue drivers in this filtered view.")
 
@@ -357,7 +361,7 @@ def render_breakdowns(df: pd.DataFrame, ctx: dict[str, Any]) -> None:
     score_col = ctx["score_col"]
     section_title("Breakdown explorer", "Compare scores by agent, QA scorer, call/chat, or business dimension.")
     col1, col2, col3 = st.columns([1, 1, 1])
-    group_options = [c for c in FILTER_COLUMNS if c in df.columns] + ["Audit Month"]
+    group_options = [c for c in BREAKDOWN_COLUMNS if c in df.columns]
     primary = col1.selectbox("Primary breakdown", group_options, index=group_options.index("Agent Name") if "Agent Name" in group_options else 0)
     split_options = ["None"] + [c for c in group_options if c != primary]
     split = col2.selectbox("Optional split", split_options, index=split_options.index("Quality Auditor") if "Quality Auditor" in split_options else 0)
@@ -375,11 +379,13 @@ def render_breakdowns(df: pd.DataFrame, ctx: dict[str, Any]) -> None:
         fig = px.bar(chart_df, x=primary, y="Avg_Score", color="Fatal_Rate", hover_data=["Audits", "Avg_Defect"])
         fig.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_layout(fig, 430), use_container_width=True)
+        st.caption("Average score by selected breakdown. Color intensity represents fatal rate.")
     with right:
         fig = px.scatter(summary, x="Avg_Defect", y="Avg_Score", size="Audits", color="Fatal_Rate", hover_name=primary)
         fig.update_xaxes(tickformat=".0%")
         fig.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_layout(fig, 430), use_container_width=True)
+        st.caption("Each bubble is one group. X is average defect rate, Y is average score, bubble size is audit count.")
 
     if split != "None":
         split_df = (
@@ -414,17 +420,21 @@ def render_qa_view(df: pd.DataFrame, long_df: pd.DataFrame, ctx: dict[str, Any])
         fig = px.bar(qa_summary, x="Quality Auditor", y="Avg_Score", color="Fatal_Rate", text="Audits")
         fig.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_layout(fig, 390), use_container_width=True)
+        st.caption("Average score by QA scorer. Bar labels show audit count. Color shows fatal rate.")
     with right:
         fig = px.box(df, x="Quality Auditor", y=score_col, color="Call/Chat" if "Call/Chat" in df.columns else None, points="all")
         fig.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_layout(fig, 390), use_container_width=True)
+        st.caption("Score spread by QA scorer. Each dot is an audit, grouped by Call/Chat when available.")
 
     issue = long_df[long_df["Applicable"] & long_df["Status"].isin(["Fail", "Partial", "Fatal"])]
     if not issue.empty:
         heat = issue.groupby(["Parameter", "Quality Auditor"]).size().reset_index(name="Issues")
         pivot = heat.pivot(index="Parameter", columns="Quality Auditor", values="Issues").fillna(0)
+        st.markdown("#### QA issue observation heatmap")
         fig = px.imshow(pivot, text_auto=True, aspect="auto", color_continuous_scale="Purples")
         st.plotly_chart(fig_layout(fig, 560), use_container_width=True)
+        st.caption("This is not missing-value tracking. It counts applicable scored checks marked Fail, Partial, or Fatal by QA scorer and parameter. Zero means no issue was observed in the current filters.")
 
 
 def render_findings(long_df: pd.DataFrame, compliance_df: pd.DataFrame) -> None:
@@ -457,6 +467,177 @@ def render_findings(long_df: pd.DataFrame, compliance_df: pd.DataFrame) -> None:
         table["Failure_Rate"] = table["Failure_Rate"].map(display_percent)
         table["Avg_Score_Pct"] = table["Avg_Score_Pct"].map(display_percent)
         st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+
+def _format_table_for_display(frame: pd.DataFrame) -> pd.DataFrame:
+    out = frame.copy()
+    for col in out.columns:
+        col_l = str(col).lower()
+        if any(token in col_l for token in ["score", "defect", "rate", "%"]):
+            if pd.api.types.is_numeric_dtype(out[col]):
+                if out[col].dropna().between(-1, 1).mean() > 0.6:
+                    out[col] = out[col].map(display_percent)
+    return out
+
+
+def render_data_view(dataset: ScoredDataset, ctx: dict[str, Any]) -> None:
+    section_title("Computed and entered data view", "Single table with entered audit responses, computed parameter scores, section scores, compliance flags, and overall metrics.")
+    view = ctx.get("data_view", pd.DataFrame()).copy()
+    if view.empty:
+        st.info("No computed data view is available for this source.")
+        return
+
+    search = st.text_input("Search data view", key="data_view_search")
+    if search:
+        searchable = view.astype(str).agg(" ".join, axis=1)
+        view = view[searchable.str.contains(search, case=False, na=False)]
+
+    column_groups = {
+        "Summary": [c for c in view.columns if c in META_COLUMNS_CANONICAL or c in ["Record ID", "Overall Score (With Fatal)", "Overall Score (Without Fatal)", "Defect %", "Has Fatal", "Earned Score", "Applicable Max Score", "Applicable Parameter Count", "Failed Parameter Count", "Fatal Count"]],
+        "Entered responses": [c for c in view.columns if c.startswith("Entered ::")],
+        "Computed scores": [c for c in view.columns if c.startswith("Computed Score ::")],
+        "Computed statuses": [c for c in view.columns if c.startswith("Computed Status ::")],
+        "Computed applicability": [c for c in view.columns if c.startswith("Computed Applicable ::")],
+        "Section metrics": [c for c in view.columns if c.startswith("Section ")],
+    }
+    default_cols = column_groups["Summary"] + [c for c in column_groups["Entered responses"] if any(x in c for x in ["Call Compliance", "Greeting", "Preferred Language"])]
+    default_cols = default_cols or list(view.columns[:20])
+    mode = st.radio("Column view", list(column_groups.keys()) + ["Custom"], horizontal=True, key="data_view_mode")
+    if mode == "Custom":
+        selected_cols = st.multiselect("Choose columns", list(view.columns), default=default_cols[:25], key="data_view_cols")
+    else:
+        selected_cols = column_groups.get(mode, []) or list(view.columns[:25])
+
+    st.caption(f"Showing {len(view):,} rows and {len(selected_cols):,} columns.")
+    st.dataframe(_format_table_for_display(view[selected_cols]), use_container_width=True, hide_index=True)
+    csv_bytes = view.to_csv(index=False).encode("utf-8")
+    st.download_button("Download full computed data view CSV", csv_bytes, "qa_computed_data_view.csv", "text/csv")
+
+
+def render_difference_check(ctx: dict[str, Any]) -> None:
+    section_title("Dataset vs computed difference check", "Compares formulas already present in the workbook against the Python recalculation. This is where formula drift, fixed-position errors, and NA weighting issues show up.")
+    st.caption("Assumption: workbook columns after Escalation Denied are existing formula outputs; Python-computed values follow the current scoring rules and are treated as the source of truth.")
+    comparison = ctx.get("comparison_df", pd.DataFrame()).copy()
+    if comparison.empty:
+        st.info("No existing dataset calculation columns were found after Escalation Denied, so there is nothing to compare against.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    total = len(comparison)
+    mismatches = int((~comparison["Match"]).sum()) if "Match" in comparison else 0
+    c1.metric("Compared cells", f"{total:,}")
+    c2.metric("Mismatches", f"{mismatches:,}")
+    c3.metric("Match rate", display_percent(1 - mismatches / total if total else np.nan))
+    c4.metric("Metrics compared", f"{comparison['Metric'].nunique():,}" if "Metric" in comparison else "-")
+
+    only_mismatch = st.toggle("Show mismatches only", value=True)
+    metric_types = sorted(comparison["Metric Type"].dropna().astype(str).unique().tolist()) if "Metric Type" in comparison else []
+    selected_types = st.multiselect("Metric type", metric_types, default=metric_types, key="diff_metric_types")
+    view = comparison.copy()
+    if only_mismatch and "Match" in view.columns:
+        view = view[~view["Match"]]
+    if selected_types and "Metric Type" in view.columns:
+        view = view[view["Metric Type"].astype(str).isin(selected_types)]
+
+    if not view.empty and "Difference" in view.columns:
+        chart_df = (
+            view.assign(Abs_Difference=view["Difference"].abs())
+            .groupby(["Metric Type", "Metric"], dropna=False)
+            .agg(Mismatches=("Match", lambda s: int((~s).sum())), Avg_Abs_Difference=("Abs_Difference", "mean"))
+            .reset_index()
+            .sort_values(["Mismatches", "Avg_Abs_Difference"], ascending=[False, False])
+            .head(20)
+        )
+        if not chart_df.empty:
+            fig = px.bar(chart_df, x="Mismatches", y="Metric", color="Metric Type", orientation="h", hover_data=["Avg_Abs_Difference"])
+            st.plotly_chart(fig_layout(fig, 460), use_container_width=True)
+
+    display_cols = [c for c in ["Record ID", "Audit Date", "Audit Month", "Quality Auditor", "Call/Chat", "Agent Name", "Supervisor name", "LOB", "Sub-LOB", "Reason for call", "Metric Type", "Metric", "Dataset Value", "Computed Value", "Difference", "Match"] if c in view.columns]
+    st.dataframe(view[display_cols], use_container_width=True, hide_index=True)
+    st.download_button("Download difference check CSV", comparison.to_csv(index=False).encode("utf-8"), "qa_dataset_vs_computed_differences.csv", "text/csv")
+
+
+def render_custom_visual(df: pd.DataFrame, long_df: pd.DataFrame, compliance_df: pd.DataFrame, ctx: dict[str, Any]) -> None:
+    section_title("Custom visual builder", "Break down computed scores and entered/compliance data by audit date, audit month, QA scorer, channel, agent, supervisor, LOB, Sub-LOB, or reason for call.")
+    if df.empty:
+        st.info("No filtered data available.")
+        return
+
+    metric_options = {
+        "Overall Score With Fatal": "Overall Score (With Fatal)",
+        "Overall Score Without Fatal": "Overall Score (Without Fatal)",
+        "Defect %": "Defect %",
+        "Fatal Rate": "Has Fatal",
+        "Audit Count": "Record ID",
+        "Applicable Parameter Count": "Applicable Parameter Count",
+        "Failed Parameter Count": "Failed Parameter Count",
+    }
+    for col in [c for c in df.columns if c.startswith("Section Score ::")]:
+        metric_options[col.replace("Section Score ::", "Section Score")]=col
+
+    c1, c2, c3, c4 = st.columns([1.1, 1, 1, 1])
+    metric_label = c1.selectbox("Metric", list(metric_options.keys()), index=0)
+    metric_col = metric_options[metric_label]
+    group_options = [c for c in BREAKDOWN_COLUMNS if c in df.columns]
+    group_by = c2.selectbox("Break down by", group_options, index=group_options.index("Agent Name") if "Agent Name" in group_options else 0)
+    split_by = c3.selectbox("Split by", ["None"] + [c for c in group_options if c != group_by], index=0)
+    chart_type = c4.selectbox("Chart type", ["Bar", "Line", "Heatmap", "Table"], index=0)
+
+    if metric_col == "Record ID":
+        agg = df.groupby([group_by] + ([] if split_by == "None" else [split_by]), dropna=False).agg(Value=("Record ID", "count"), Audits=("Record ID", "count")).reset_index()
+    elif metric_col == "Has Fatal":
+        agg = df.groupby([group_by] + ([] if split_by == "None" else [split_by]), dropna=False).agg(Value=("Has Fatal", "mean"), Audits=("Record ID", "count")).reset_index()
+    else:
+        agg = df.groupby([group_by] + ([] if split_by == "None" else [split_by]), dropna=False).agg(Value=(metric_col, "mean"), Audits=("Record ID", "count")).reset_index()
+
+    agg[group_by] = agg[group_by].fillna("Unknown")
+    if split_by != "None":
+        agg[split_by] = agg[split_by].fillna("Unknown")
+
+    pct_metric = metric_col not in {"Record ID", "Applicable Parameter Count", "Failed Parameter Count"}
+    if chart_type == "Heatmap" and split_by != "None":
+        pivot = agg.pivot(index=group_by, columns=split_by, values="Value").fillna(0)
+        fig = px.imshow(pivot, text_auto=True, aspect="auto")
+        st.plotly_chart(fig_layout(fig, 560), use_container_width=True)
+    elif chart_type == "Line":
+        fig = px.line(agg.sort_values(group_by), x=group_by, y="Value", color=None if split_by == "None" else split_by, markers=True, hover_data=["Audits"])
+        if pct_metric:
+            fig.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_layout(fig, 480), use_container_width=True)
+    elif chart_type == "Table":
+        table = agg.copy()
+        if pct_metric:
+            table["Value"] = table["Value"].map(display_percent)
+        st.dataframe(table, use_container_width=True, hide_index=True)
+    else:
+        fig = px.bar(agg, x=group_by, y="Value", color=None if split_by == "None" else split_by, hover_data=["Audits"], barmode="group")
+        if pct_metric:
+            fig.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_layout(fig, 480), use_container_width=True)
+        st.caption("Visual uses the computed metric and the active filters from the sidebar.")
+
+    st.markdown("#### Raw data behind the visual")
+    table = agg.copy()
+    if pct_metric:
+        table["Value"] = table["Value"].map(display_percent)
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Optional parameter-level visual")
+    param_metric = st.selectbox("Parameter metric", ["Issue count", "Average score %", "Applicable count"], key="param_metric")
+    param_group = st.selectbox("Parameter breakdown", group_options, index=group_options.index("Quality Auditor") if "Quality Auditor" in group_options else 0, key="param_group")
+    applicable = long_df[long_df["Applicable"]].copy()
+    if not applicable.empty and param_group in applicable.columns:
+        applicable["Issue"] = applicable["Status"].isin(["Fail", "Partial", "Fatal"])
+        if param_metric == "Issue count":
+            pvt = applicable.groupby([param_group, "Parameter"], dropna=False).agg(Value=("Issue", "sum")).reset_index()
+        elif param_metric == "Average score %":
+            pvt = applicable.groupby([param_group, "Parameter"], dropna=False).agg(Value=("Score %", "mean")).reset_index()
+        else:
+            pvt = applicable.groupby([param_group, "Parameter"], dropna=False).agg(Value=("Record ID", "count")).reset_index()
+        matrix = pvt.pivot(index="Parameter", columns=param_group, values="Value").fillna(0)
+        fig = px.imshow(matrix, text_auto=True, aspect="auto")
+        st.plotly_chart(fig_layout(fig, 620), use_container_width=True)
 
 
 def render_records(df: pd.DataFrame, long_df: pd.DataFrame, ctx: dict[str, Any]) -> None:
@@ -510,10 +691,12 @@ def render_audit(dataset: ScoredDataset) -> None:
     else:
         st.markdown("<div class='good'><b>All scoring parameters matched.</b> No score column is tied to fixed Excel positions.</div>", unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Detected header row", diag.get("detected_header_row_excel", "-"))
     c2.metric("Raw end column", diag.get("raw_data_end_column_excel", "-"))
     c3.metric("Records loaded", diag.get("records_loaded", "-"))
+    c4.metric("Compared cells", diag.get("comparison_rows", "-"))
+    c5.metric("Mismatches", diag.get("comparison_mismatches", "-"))
 
     if diag.get("inferred_headers"):
         st.markdown("#### Inferred blank headers")
@@ -543,6 +726,12 @@ def render_setup() -> None:
         `Overall Score With Fatal` = `0` if any raw audit cell up to `Escalation Denied` contains `Fatal`, otherwise the same as without fatal.  
         `Defect %` = failed, partial, or fatal applicable parameters divided by total applicable parameters.  
         CMM compliance fields have max score `0`, so they are tracked only and do not affect the score.
+
+        **Added validation views**
+
+        - Data view shows entered responses beside Python-computed scores, statuses, section scores, and overall scores.
+        - Difference check compares workbook formula outputs after `Escalation Denied` against the Python-computed values.
+        - Custom visual builder can break scores down by Audit Date, Audit Month, QA scorer, Call/Chat, agent, supervisor, LOB, Sub-LOB, and reason for call.
 
         **Google Sheets sync options**
 
@@ -575,15 +764,13 @@ def empty_state() -> None:
         """
         <div class="hero">
             <h1>QA Audit Intelligence</h1>
-            <p>Upload the workbook, paste a published Google Sheet link, or connect a private Google Sheet with OAuth.</p>
-            <span class="pill">No fixed column positions</span>
-            <span class="pill">Formula-based scoring</span>
-            <span class="pill">Fatal-aware score modes</span>
+            <span class="pill">Upload workbook</span>
+            <span class="pill">Published Google Sheet</span>
+            <span class="pill">Google OAuth</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    render_setup()
 
 
 def main() -> None:
@@ -605,24 +792,23 @@ def main() -> None:
     hero(dataset, ctx)
     if df.empty:
         st.warning("No records match the selected filters.")
-        render_audit(dataset)
         return
 
-    tabs = st.tabs(["Overview", "Breakdowns", "QA scorer view", "Findings", "Audit explorer", "Data audit", "Setup"])
+    tabs = st.tabs(["Overview", "Breakdowns", "Custom visual", "Data view", "Difference check", "QA scorer view", "Findings"])
     with tabs[0]:
         render_overview(df, long_df, ctx)
     with tabs[1]:
         render_breakdowns(df, ctx)
     with tabs[2]:
-        render_qa_view(df, long_df, ctx)
+        render_custom_visual(df, long_df, compliance_df, ctx)
     with tabs[3]:
-        render_findings(long_df, compliance_df)
+        render_data_view(dataset, ctx)
     with tabs[4]:
-        render_records(df, long_df, ctx)
+        render_difference_check(ctx)
     with tabs[5]:
-        render_audit(dataset)
+        render_qa_view(df, long_df, ctx)
     with tabs[6]:
-        render_setup()
+        render_findings(long_df, compliance_df)
 
 
 if __name__ == "__main__":
