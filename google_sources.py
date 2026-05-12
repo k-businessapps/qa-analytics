@@ -216,8 +216,11 @@ def handle_oauth_callback() -> None:
 
     creds = _create_credentials_from_token_payload(response.json())
     st.session_state["google_credentials"] = creds.to_json()
+    st.session_state["data_source_mode"] = "Google OAuth"
+    st.session_state["oauth_callback_completed"] = True
     if state:
         st.session_state["pending_google_sheet_url"] = state
+        st.session_state["oauth_sheet_url"] = state
     st.query_params.clear()
     st.rerun()
 
