@@ -87,6 +87,8 @@ FATAL_VALUES = {"FATAL"}
 YES_VALUES = {"Y", "YES", "TRUE", "PASS", "PASSED", "1"}
 NO_VALUES = {"N", "NO", "FALSE", "FAIL", "FAILED", "0"}
 
+SCORING_ENGINE_VERSION = "2026-05-12-v5"
+
 
 @dataclass(frozen=True)
 class ScoringRule:

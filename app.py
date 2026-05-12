@@ -19,17 +19,7 @@ from google_sources import (
     load_google_oauth_dataset,
     load_published_google_sheet,
 )
-from scoring_engine import (
-    BREAKDOWN_COLUMNS,
-    FILTER_COLUMNS,
-    META_COLUMNS_CANONICAL,
-    ScoredDataset,
-    display_number,
-    display_percent,
-    group_summary,
-    load_dataset_from_upload,
-    parameter_failure_summary,
-)
+import scoring_engine as scoring_engine_module
 
 st.set_page_config(
     page_title="QA Audit Intelligence",
@@ -37,6 +27,39 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+EXPECTED_SCORING_ENGINE_VERSION = "2026-05-12-v5"
+ENGINE_VERSION = getattr(scoring_engine_module, "SCORING_ENGINE_VERSION", "unknown")
+if ENGINE_VERSION != EXPECTED_SCORING_ENGINE_VERSION:
+    st.error(
+        "The deployed files are out of sync. Please replace app.py and scoring_engine.py together from the latest ZIP. "
+        f"Expected scoring_engine.py version {EXPECTED_SCORING_ENGINE_VERSION}, but found {ENGINE_VERSION}."
+    )
+    st.stop()
+
+FILTER_COLUMNS = scoring_engine_module.FILTER_COLUMNS
+META_COLUMNS_CANONICAL = scoring_engine_module.META_COLUMNS_CANONICAL
+BREAKDOWN_COLUMNS = getattr(
+    scoring_engine_module,
+    "BREAKDOWN_COLUMNS",
+    [
+        "Audit Date",
+        "Audit Month",
+        "Quality Auditor",
+        "Call/Chat",
+        "Agent Name",
+        "Supervisor name",
+        "LOB",
+        "Sub-LOB",
+        "Reason for call",
+    ],
+)
+ScoredDataset = scoring_engine_module.ScoredDataset
+display_number = scoring_engine_module.display_number
+display_percent = scoring_engine_module.display_percent
+group_summary = scoring_engine_module.group_summary
+load_dataset_from_upload = scoring_engine_module.load_dataset_from_upload
+parameter_failure_summary = scoring_engine_module.parameter_failure_summary
 
 SCORE_MODES = {
     "With fatal rule": "Overall Score (With Fatal)",
