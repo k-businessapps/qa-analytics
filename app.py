@@ -132,10 +132,14 @@ def _load_oauth_cached(spreadsheet_id: str, audit_sheet_title: str, token_finger
 def source_picker() -> ScoredDataset | None:
     handle_oauth_callback()
     st.sidebar.header("Data source")
+    source_mode_options = ["Upload .xlsx or .csv", "Google published link", "Google OAuth"]
+    if st.session_state.get("data_source_mode") not in source_mode_options:
+        st.session_state["data_source_mode"] = "Upload .xlsx or .csv"
+
     source_mode = st.sidebar.radio(
         "Choose how to load QA data",
-        ["Upload .xlsx or .csv", "Google published link", "Google OAuth"],
-        index=0,
+        source_mode_options,
+        key="data_source_mode",
     )
 
     if source_mode == "Upload .xlsx or .csv":
@@ -155,8 +159,11 @@ def source_picker() -> ScoredDataset | None:
         return _load_published_cached(published_url)
 
     st.sidebar.caption("Use this for private Google Sheets. The Google Cloud OAuth redirect URI must exactly match your Streamlit app URL.")
-    pending_url = st.session_state.pop("pending_google_sheet_url", "")
-    sheet_url = st.sidebar.text_input("Private Google Sheet link", value=pending_url, key="oauth_sheet_url")
+    pending_url = st.session_state.get("pending_google_sheet_url", "")
+    if pending_url and not st.session_state.get("oauth_sheet_url"):
+        st.session_state["oauth_sheet_url"] = pending_url
+
+    sheet_url = st.sidebar.text_input("Private Google Sheet link", key="oauth_sheet_url")
     if st.sidebar.button("Disconnect Google"):
         disconnect_google()
         st.rerun()
